@@ -14,7 +14,7 @@ library(ggplot2)
 # RUTAS — ajustá según donde tengas los archivos descargados
 # ------------------------------------------------------------------------------
 carpeta_datos  <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Productos de conocimiento/Paper CCS/Neuquen/datos nqn"   # carpeta donde están el .shp y los 3 .xlsX
-carpeta_salida <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Productos de conocimiento/Paper CCS/Neuquen/datos nqn/salida_neuquen"
+carpeta_salida <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Productos de conocimiento/Paper CCS/paper_ccs/data/neuquen"
 dir.create(carpeta_salida, showWarnings = FALSE)
 
 # ==============================================================================
@@ -38,6 +38,19 @@ radios_confluencia <- st_read(
 
 message("Radios cargados: ", nrow(radios_confluencia))
 # Esperado: 645 radios (605 urbanos + 33 mixtos + 7 rurales)
+
+
+# ------------------------------------------------------------------------------
+# PASO 1-bis. Calcular el área de cada radio censal (para densidad poblacional)
+# ------------------------------------------------------------------------------
+# El shapefile viene en coordenadas geográficas (lat/lon), donde st_area() no da
+# metros cuadrados reales. Se reproyecta a UTM zona 19S (EPSG:32719), la faja
+# UTM que cubre Neuquén (~68°O), se calcula el área en esa proyección y se
+# guarda en el objeto original en su CRS geográfico (no se pisa la geometría
+# usada para los mapas).
+radios_confluencia <- radios_confluencia |>
+  mutate(area_km2 = as.numeric(st_area(st_transform(radios_confluencia, 32719))) / 1e6)
+
 
 # ------------------------------------------------------------------------------
 # PASO 2. Leer los 3 Excel de Redatam y armar una tabla única de indicadores
@@ -78,6 +91,42 @@ indicadores <- envejecimiento |>
 
 message("Radios con indicadores: ", nrow(indicadores))
 
+
+# ------------------------------------------------------------------------------
+# PASO 2-bis. Leer población total por radio (para densidad poblacional) y NBI
+# ------------------------------------------------------------------------------
+# A diferencia de los 3 archivos anteriores (formato "tabulado", un radio por
+# fila con los indicadores ya calculados en columnas), la exportación Redatam
+# de población viene en formato "frecuencias" (un bloque AREA # <radio> por
+# radio, con la distribución por grupos de edad y la fila "Total" = población
+# total). Ese archivo ya fue reordenado a dos columnas (codigo, poblacion_total)
+# y guardado como neuquen_poblacion_total_radios.xlsx — se coloca en la misma
+# carpeta que los otros 3 Excel (carpeta_datos) antes de correr el script.
+poblacion <- read_excel(
+  file.path(carpeta_datos, "neuquen_poblacion_total_radios.xlsx"),
+  sheet = "poblacion_radios"
+)
+poblacion$codigo <- suppressWarnings(as.numeric(poblacion$codigo))
+poblacion <- poblacion[!is.na(poblacion$codigo), ]
+
+
+nbi <- read_excel(
+  file.path(carpeta_datos, "nbi_nqn.xlsx"),
+  sheet = "Output"
+)
+nbi$codigo <- suppressWarnings(as.numeric(nbi$radio))
+
+
+# Unir los cinco indicadores por código de radio
+indicadores <- envejecimiento |>
+  full_join(actividad_empleo, by = "codigo") |>
+  full_join(servicios, by = "codigo") |>
+  full_join(poblacion, by = "codigo") |>
+  full_join(nbi, by = "codigo")
+
+message("Radios con indicadores: ", nrow(indicadores))
+
+
 # ------------------------------------------------------------------------------
 # PASO 3. Unir la geometría (LINK) con los indicadores (Código)
 # ------------------------------------------------------------------------------
@@ -95,6 +144,25 @@ confluencia_ind <- radios_confluencia |>
 # Diagnóstico rápido de la unión (debería dar match completo, ya verificado 1:1)
 sin_match <- sum(is.na(confluencia_ind$indice_envejecimiento))
 message("Radios sin indicadores tras el join: ", sin_match, " de ", nrow(confluencia_ind))
+
+# ------------------------------------------------------------------------------
+# PASO 3-ter. Densidad poblacional (habitantes / km2)
+# ------------------------------------------------------------------------------
+# poblacion_total viene del Excel de Redatam; area_km2 se calculó en PASO 1-bis
+# reproyectando a UTM 19S. Radios sin población (NA) o sin área (polígono nulo)
+# quedan como NA, igual que el resto de los indicadores.
+confluencia_ind <- confluencia_ind |>
+  mutate(densidad_poblacional = poblacion_total / area_km2)
+
+message("Densidad poblacional — resumen (hab/km2): ")
+print(summary(confluencia_ind$densidad_poblacional))
+
+# ------------------------------------------------------------------------------
+# PASO 3-ter A . % DE HOGARES CON NBI
+# ------------------------------------------------------------------------------
+confluencia_ind <- confluencia_ind |>
+  mutate(nbi_pct = viv_nbi / total_viv*100)
+
 
 # ------------------------------------------------------------------------------
 # PASO 3-bis. Recorte al conglomerado urbano Neuquén–Plottier–Centenario–Vista Alegre
@@ -235,6 +303,15 @@ mapa_variable(confluencia_urbano, "pct_sin_agua_red",
 mapa_variable(confluencia_urbano, "pct_desague_sin_red",
               "Hogares con desagüe no conectado a la red pública (%) — Confluencia, Neuquén",
               "% sin desagüe", "07_pct_desague_sin_red.png")
+
+
+mapa_variable(confluencia_urbano, "densidad_poblacional",
+              "Densidad poblacional — Confluencia, Neuquén",
+              "Hab./km²", "08_densidad_poblacional.png")
+
+mapa_variable(confluencia_urbano, "nbi_pct",
+              "% de NBI — Confluencia, Neuquén",
+              "08_densidad_poblacional.png")
 
 # ------------------------------------------------------------------------------
 # PASO 6. Guardar la base final (para usarla en otros análisis del paper)
