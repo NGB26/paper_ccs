@@ -13,8 +13,11 @@ library(dplyr)
 library(ggplot2)
 
 # ---- 0. Cargar datos --------------------------------------------------------
-setwd("~/Documents/BID-HWandCITIES")
-p1 <- st_read("./Datos_nico/salida_monteria/monteria_base_manzanas.shp")
+carpeta_datos  <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Productos de conocimiento/Paper CCS/paper_ccs/data/monteria"
+carpeta_salida <- file.path(carpeta_datos, "Riesgo")
+dir.create(carpeta_salida, showWarnings = FALSE, recursive = TRUE)
+
+p1 <- st_read(file.path(carpeta_datos, "monteria_base_manzanas.shp"), quiet = TRUE)
 
 # ---- 1. Funcion de normalizacion min-max (0-1) ------------------------------
 normalizar <- function(x) {
@@ -115,9 +118,8 @@ ggplot(p1) +
   theme(axis.text = element_blank(), axis.ticks = element_blank())
 
 # ---- 9. Guardar resultados -----------------------------------------------------
-dir.create("./Riesgo", showWarnings = FALSE)
-st_write(p1, "./Riesgo/monteria_ivs_manzanas.gpkg", delete_dsn = TRUE)
-write.csv(top_vulnerables, "./Riesgo/monteria_top20_vulnerables.csv", row.names = FALSE)
+st_write(p1, file.path(carpeta_salida, "monteria_ivs_manzanas.gpkg"), delete_dsn = TRUE, quiet = TRUE)
+write.csv(top_vulnerables, file.path(carpeta_salida, "monteria_top20_vulnerables.csv"), row.names = FALSE)
 
 ################################################################################
 ################################################################################
@@ -126,7 +128,10 @@ write.csv(top_vulnerables, "./Riesgo/monteria_top20_vulnerables.csv", row.names 
 library(terra)
 
 # ---- 10. Cargar el raster de LST ---------------------------------------------
-lst <- rast("./Outputs/dLST/Montería/resultados/monteria_LST_media.tif")
+# Este raster (dLST) se genera en un pipeline aparte (no esta en este repo).
+# Se busca en data/monteria/; si no esta ahi, hay que copiarlo antes de correr
+# esta parte.
+lst <- rast(file.path(carpeta_datos, "monteria_LST_media.tif"))
 
 # ---- 11. Exposicion: LST media por manzana -----------------------------------
 # p1 quedo en EPSG:9377 (paso 2, para calcular area/densidad). Para extraer
@@ -246,9 +251,9 @@ mapa_ivs_manzanas <- ggplot(p1) +
 mapa_ivs_manzanas
 
 # ---- 19. Guardar los dos mapas nuevos -------------------------------------------
-ggsave("./Riesgo/mapa_lst_monteria.png", mapa_lst_manzanas, width = 10, height = 10, dpi = 300, bg = "white")
-ggsave("./Riesgo/mapa_ivs_monteria.png", mapa_ivs_manzanas, width = 10, height = 10, dpi = 300, bg = "white")
+ggsave(file.path(carpeta_salida, "mapa_lst_monteria.png"), mapa_lst_manzanas, width = 10, height = 10, dpi = 300, bg = "white")
+ggsave(file.path(carpeta_salida, "mapa_ivs_monteria.png"), mapa_ivs_manzanas, width = 10, height = 10, dpi = 300, bg = "white")
 # ---- 16. Guardar resultados finales --------------------------------------------
-st_write(p1, "./Riesgo/monteria_riesgo_manzanas.gpkg", delete_dsn = TRUE)
-write.csv(top_riesgo, "./Riesgo/monteria_top20_riesgo.csv", row.names = FALSE)
-ggsave("./Riesgo/mapa_riesgo_monteria.png", mapa_riesgo, width = 10, height = 10, dpi = 300, bg = "white")
+st_write(p1, file.path(carpeta_salida, "monteria_riesgo_manzanas.gpkg"), delete_dsn = TRUE, quiet = TRUE)
+write.csv(top_riesgo, file.path(carpeta_salida, "monteria_top20_riesgo.csv"), row.names = FALSE)
+ggsave(file.path(carpeta_salida, "mapa_riesgo_monteria.png"), mapa_riesgo, width = 10, height = 10, dpi = 300, bg = "white")
