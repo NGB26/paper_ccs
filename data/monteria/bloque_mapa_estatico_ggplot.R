@@ -1,0 +1,87 @@
+
+## 5. Mapa estático con ggplot2 -------------------------------------------------
+# Bloque independiente: usa los objetos que ya creó el script (mz, es, cobertura,
+# cobertura_pob, CRS_M, PERFIL, vel_kmh, DIR). Se puede pegar al final tal cual.
+
+library(ggplot2)
+
+VAR_MZ    <- "pob"      # variable para colorear manzanas: "pob", "p65" o "acu"
+VISTA_GG  <- "urbano"   # "urbano" (casco urbano) o "municipio" (todas las sedes)
+SALIDA_PNG <- file.path(DIR, "mapa_estatico_monteria_isocronas.png")
+
+# 5.1 Manzanas en cinco clases por cuantiles (una sola tonalidad, de claro a oscuro)
+titulo_var <- switch(VAR_MZ,
+  pob = "Población por manzana",
+  p65 = "Población de 65 años o más (%)",
+  acu = "Viviendas con acueducto (%)"
+)
+valores <- mz[[VAR_MZ]]
+cortes  <- unique(quantile(valores, probs = seq(0, 1, 0.2), na.rm = TRUE))
+fmt     <- function(x) if (VAR_MZ == "pob") format(round(x), big.mark = ".", decimal.mark = ",", trim = TRUE) else paste0(round(x), "%")
+etiq    <- paste0(fmt(head(cortes, -1)), " a ", fmt(tail(cortes, -1)))
+mz_gg   <- mz
+mz_gg$clase <- cut(valores, breaks = cortes, labels = etiq, include.lowest = TRUE)
+rampa_mz <- colorRampPalette(c("#eef1ee", "#a9b5ad", "#3d4a43"))(nlevels(mz_gg$clase))
+
+# 5.2 Isócronas: contornos ordenados de menor a mayor tiempo (más oscuro = más cerca)
+cob_gg <- cobertura[order(-cobertura$minutos), ]
+cob_gg$min_f <- factor(cob_gg$minutos, levels = sort(unique(cob_gg$minutos)))
+col_iso <- setNames(colorRampPalette(c("#7c2d12", "#d97706", "#fbbf24"))(nlevels(cob_gg$min_f)),
+                    levels(cob_gg$min_f))
+
+# 5.3 Sedes de salud: forma por nivel (círculo = 1, rombo = 2), todas en azul
+es_gg <- st_transform(es, CRS_M)
+es_gg$nivel_f <- factor(es_gg$nivel, levels = c(1, 2), labels = c("Nivel 1", "Nivel 2"))
+
+# 5.4 Encuadre
+ext <- if (VISTA_GG == "urbano") st_bbox(mz_gg) else st_bbox(st_union(st_geometry(mz_gg), st_geometry(es_gg)))
+dx <- (ext[["xmax"]] - ext[["xmin"]]) * 0.03
+dy <- (ext[["ymax"]] - ext[["ymin"]]) * 0.03
+
+# 5.5 Texto: cobertura de las isócronas
+cob_txt <- paste0(
+  "Población urbana a ≤", cobertura_pob$min, " min: ", cobertura_pob$pct, "%",
+  collapse = "  ·  "
+)
+
+g <- ggplot() +
+  geom_sf(data = mz_gg, aes(fill = clase), color = "white", linewidth = 0.03) +
+  geom_sf(data = cob_gg, aes(color = min_f), fill = NA, linewidth = 0.6) +
+  geom_sf(data = es_gg, aes(shape = nivel_f), fill = "#1d4ed8", color = "white", size = 2.6, stroke = 0.5) +
+  scale_fill_manual(values = rampa_mz, name = titulo_var, na.value = "#f7f7f5", drop = FALSE,
+                    na.translate = TRUE, guide = guide_legend(order = 1, reverse = TRUE)) +
+  scale_color_manual(values = col_iso, name = "Isócrona (min)", guide = guide_legend(order = 2, override.aes = list(linewidth = 1))) +
+  scale_shape_manual(values = c("Nivel 1" = 21, "Nivel 2" = 23), name = "Centro de salud", guide = guide_legend(order = 3)) +
+  coord_sf(xlim = c(ext[["xmin"]] - dx, ext[["xmax"]] + dx),
+           ylim = c(ext[["ymin"]] - dy, ext[["ymax"]] + dy), expand = FALSE) +
+  labs(
+    title    = "Montería: centros de salud de primer y segundo nivel e isócronas",
+    subtitle = cob_txt,
+    caption  = paste0("Tiempo por la red de OpenStreetMap (osmdata + dodgr), perfil \"", PERFIL, "\" a ", vel_kmh,
+                      " km/h. Manzanas: base de manzanas de Montería. Sedes: Health_Facilities_ES.")
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    plot.background   = element_rect(fill = "white", color = NA),
+    panel.background  = element_rect(fill = "#fafbf9", color = NA),
+    plot.title        = element_text(face = "bold", size = 14, margin = margin(b = 4)),
+    plot.subtitle     = element_text(color = "#5d6b64", margin = margin(b = 8)),
+    plot.caption      = element_text(color = "#5d6b64", size = 8, hjust = 0, margin = margin(t = 8)),
+    plot.margin       = margin(12, 12, 12, 12),
+    legend.position   = "right",
+    legend.title      = element_text(size = 9, face = "bold"),
+    legend.text       = element_text(size = 8.5),
+    legend.key.size   = unit(0.45, "cm")
+  )
+
+# Barra de escala y norte si está instalado ggspatial (opcional)
+if (requireNamespace("ggspatial", quietly = TRUE)) {
+  g <- g +
+    ggspatial::annotation_scale(location = "bl", width_hint = 0.25, text_cex = 0.7) +
+    ggspatial::annotation_north_arrow(location = "tr", which_north = "true",
+                                      style = ggspatial::north_arrow_minimal(), height = unit(0.9, "cm"))
+}
+
+print(g)
+ggsave(SALIDA_PNG, g, width = 9, height = 10, dpi = 300, bg = "white")
+cat("Mapa estático:", SALIDA_PNG, "\n")
