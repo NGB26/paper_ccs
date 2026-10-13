@@ -1,14 +1,16 @@
 # =============================================================================
-# NEUQUÉN (Argentina): mapa estático de riesgo por calor, centros de atención
-# primaria (ESSIDT) públicos e isócrona a pie
+# NEUQUÉN (Argentina): mapa estático de riesgo por calor, establecimientos de
+# salud públicos con atención a demanda espontánea e isócrona a pie
 # -----------------------------------------------------------------------------
 # Qué hace
 #   1. Lee el KMZ de riesgo por calor (un polígono por radio censal). De la ficha
 #      de cada radio toma la densidad y el % de personas de 65+, y con la
 #      superficie reconstruye la población (densidad x superficie).
 #   2. Lee el Excel del REFES, NORMALIZA las coordenadas y se queda con los
-#      establecimientos públicos de tipología ESSIDT (centros de salud y puestos
-#      sanitarios) de la provincia de Neuquén.
+#      establecimientos públicos de la provincia de Neuquén que atienden demanda
+#      espontánea: ESSIDT (centros de salud, puestos sanitarios y demás atención
+#      ambulatoria, incluidas las unidades metabólicas/de diabetes), hospitales
+#      con internación de cualquier nivel de riesgo y unidades de atención móviles.
 #   3. Lee la red vial de OpenStreetMap (extracto de Argentina) y calcula
 #      isócronas (tiempo por la red) desde cada sede con dodgr.
 #   4. Dibuja el mapa estático con ggplot2 y lo guarda en PNG.
@@ -56,8 +58,22 @@ GUARDAR_CAPAS  <- TRUE     # además del PNG, guardar el GeoPackage y el CSV de 
 # Sedes de salud (REFES)
 PROVINCIA_RE     <- "^neuqu"       # expresión regular (sin distinguir mayúsculas) sobre PROVINCIA
 DEPARTAMENTO_RE  <- NULL           # NULL = toda la provincia (el mapa recorta a la zona del KMZ); ej. "^Confluencia$"
-TIPOLOGIA        <- "ESSIDT"       # CODIGO_TIPOLOGIA: establecimiento de salud sin internación de diagnóstico y tratamiento
+# CODIGO_TIPOLOGIA que se incluyen completas:
+#   ESSIDT  sin internación de diagnóstico y tratamiento (CAPS, puestos sanitarios, consultorios;
+#           el REFES registra aquí también los centros de diabetes/metabólicos)
+#   ESCIG   con internación general (hospitales de bajo, mediano y alto riesgo)
+#   ESCIEM  con internación especializada en maternidad/materno infantil
+#   ESCIE   con internación especializada en otras especialidades
+#   (no se incluyen ESCIESM salud mental, ESCIETE tercera edad ni ESCIRES residencias)
+TIPOLOGIAS       <- c("ESSIDT", "ESCIG", "ESCIEM", "ESCIE")
+# CATEGORIA_TIPOLOGIA (regex) que se agregan aunque su tipología no esté arriba
+# (las unidades móviles son "Establecimiento de salud complementario", ESCL)
+CATEGORIAS_EXTRA <- "Unidades de Atenci.n M.viles"   # NULL = no agregar ninguna
 SOLO_PUBLICOS    <- TRUE           # ORIGEN_FINANCIAMIENTO == "Público"
+DEPENDENCIA_EXCLUIR <- "Penitenciario|FFAA"   # regex de DEPENDENCIA sin acceso para la población general; NULL = ninguna
+# Coordenadas cargadas a mano para sedes que el REFES trae sin LATITUD/LONGITUD (por ejemplo,
+# las unidades móviles). CSV opcional con columnas CODIGO,LATITUD,LONGITUD; si no existe, se ignora.
+ARCHIVO_COORD_MANUALES <- file.path(DIR, "refes_coordenadas_manuales.csv")
 ESTADO_GEO_EXCLUIR <- NULL         # regex de ESTADO_GEO a excluir; ej. "SINCONFIRMAR" (coordenadas sin confirmar)
 CAJA_COORD       <- c(xmin = -72.5, ymin = -41.3, xmax = -67.5, ymax = -36.0)  # coordenadas fuera de la provincia = error de carga
 
@@ -213,14 +229,34 @@ d <- data.frame(
   stringsAsFactors = FALSE
 )
 
+# Completa las coordenadas faltantes con el CSV manual (si existe)
+if (file.exists(ARCHIVO_COORD_MANUALES)) {
+  cm  <- read.csv(ARCHIVO_COORD_MANUALES, colClasses = "character", check.names = FALSE)
+  names(cm) <- toupper(trimws(names(cm)))
+  if (!all(c("CODIGO", "LATITUD", "LONGITUD") %in% names(cm))) {
+    stop("El CSV de coordenadas manuales debe tener las columnas CODIGO, LATITUD y LONGITUD")
+  }
+  crd_m <- normaliza_par(cm$LATITUD, cm$LONGITUD)
+  k     <- match(d$codigo, trimws(cm$CODIGO))
+  llenar <- !is.na(k) & (is.na(d$lat) | is.na(d$lon))
+  d$lat[llenar] <- crd_m$lat[k[llenar]]
+  d$lon[llenar] <- crd_m$lon[k[llenar]]
+  cat("Coordenadas completadas con", basename(ARCHIVO_COORD_MANUALES), ":", sum(llenar), "sedes\n")
+}
+
 # 2.3 Embudo de filtros: se imprime cuántas sedes quedan en cada paso
 embudo <- data.frame(paso = character(), n = integer(), stringsAsFactors = FALSE)
 anota  <- function(x, paso) { embudo[nrow(embudo) + 1, ] <<- list(paso, nrow(x)); x }
 
 d <- d |> filter(grepl(PROVINCIA_RE, provincia, ignore.case = TRUE)) |> anota("Registros de la provincia")
-d <- d |> filter(tipologia == TIPOLOGIA) |> anota(paste0("Tipología ", TIPOLOGIA))
+extra <- if (is.null(CATEGORIAS_EXTRA)) rep(FALSE, nrow(d)) else grepl(CATEGORIAS_EXTRA, d$categoria, ignore.case = TRUE)
+d <- d |> filter(tipologia %in% TIPOLOGIAS | extra) |>
+  anota(paste0("Tipología ", paste(TIPOLOGIAS, collapse = ", "), if (!is.null(CATEGORIAS_EXTRA)) " + unidades móviles"))
 if (SOLO_PUBLICOS) {
   d <- d |> filter(grepl("^P.*blico", financiam, ignore.case = TRUE)) |> anota("Públicos")
+}
+if (!is.null(DEPENDENCIA_EXCLUIR)) {
+  d <- d |> filter(is.na(dependencia) | !grepl(DEPENDENCIA_EXCLUIR, dependencia)) |> anota(paste0("Sin dependencia: ", DEPENDENCIA_EXCLUIR))
 }
 if (!is.null(DEPARTAMENTO_RE)) {
   d <- d |> filter(grepl(DEPARTAMENTO_RE, departamento, ignore.case = TRUE)) |> anota("En el departamento elegido")
@@ -234,8 +270,9 @@ d <- d |> filter(!is.na(lat), !is.na(lon),
                  lat >= CAJA_COORD[["ymin"]], lat <= CAJA_COORD[["ymax"]]) |> anota("Con coordenadas válidas (normalizadas)")
 cat("\nEmbudo de filtros de las sedes:\n"); print(embudo, row.names = FALSE)
 if (nrow(sin_coord) > 0) {
-  cat("Sedes que no se pueden mapear por falta de coordenadas:", nrow(sin_coord), "\n")
-  print(head(sin_coord[, c("nombre", "localidad")], 12), row.names = FALSE)
+  cat("Sedes que no se pueden mapear por falta de coordenadas:", nrow(sin_coord),
+      "(se pueden cargar en", basename(ARCHIVO_COORD_MANUALES), ")\n")
+  print(head(sin_coord[, c("codigo", "nombre", "categoria", "localidad")], 20), row.names = FALSE)
 }
 if (nrow(d) == 0) stop("No quedó ninguna sede: revisá los filtros de la sección 2")
 
@@ -245,9 +282,12 @@ orig_ok <- !is.na(suppressWarnings(as.numeric(d$lat_orig))) & !is.na(suppressWar
 cat("Sedes con coordenadas modificadas por la normalización:", sum(!orig_ok), "de", nrow(d), "\n")
 if (any(!orig_ok)) print(head(d[!orig_ok, c("nombre", "lat_orig", "lon_orig", "lat", "lon")], 10), row.names = FALSE)
 
-# Tipo de sede según el nombre: centro de salud / puesto sanitario / otro
-d$tipo_es <- ifelse(grepl("^PUESTO", d$nombre), "Puesto sanitario",
-                    ifelse(grepl("CENTRO DE SALUD|CAPS|CENTRO INTEGRAL DE SALUD|CIS ", d$nombre), "Centro de salud", "Otro ESSIDT"))
+# Tipo de sede: hospital y unidad móvil según la tipología; dentro de ESSIDT, según el nombre
+niv_tipo_es <- c("Hospital", "Centro de salud", "Puesto sanitario", "Otro ESSIDT", "Unidad móvil")
+d$tipo_es <- ifelse(grepl("^ESCI", d$tipologia), "Hospital",
+             ifelse(grepl("M.viles", d$categoria), "Unidad móvil",
+             ifelse(grepl("^PUESTO", d$nombre), "Puesto sanitario",
+             ifelse(grepl("CENTRO DE SALUD|CAPS|CENTRO INTEGRAL DE SALUD|CIS ", d$nombre), "Centro de salud", "Otro ESSIDT"))))
 
 es <- st_as_sf(d, coords = c("lon", "lat"), crs = 4326, remove = FALSE) |>
   mutate(id = row_number())
@@ -415,7 +455,7 @@ if (GUARDAR_CAPAS) {
   gpkg_out <- nombre_libre(SALIDA_GPKG)
   write.csv(cobertura_pob, csv_out, row.names = FALSE)
   st_write(
-    st_transform(es[, c("id", "codigo", "nombre", "dependencia", "localidad", "tipo_es")], CRS_M),
+    st_transform(es[, c("id", "codigo", "nombre", "tipologia", "categoria", "dependencia", "localidad", "tipo_es")], CRS_M),
     gpkg_out, layer = "establecimientos", quiet = TRUE
   )
   st_write(iso_est,   gpkg_out, layer = "isocronas_por_establecimiento", quiet = TRUE)
@@ -438,9 +478,10 @@ iso_r$etiqueta <- factor(etq, levels = rev(etq))
 col_iso_r <- setNames(colorRampPalette(c("#1e3a8a", "#60a5fa"))(nlevels(iso_r$etiqueta)),
                       levels(iso_r$etiqueta))
 
-# 4.3 Sedes de salud: forma según el tipo (círculo = centro de salud, triángulo = puesto sanitario), todas en azul
+# 4.3 Sedes de salud: forma según el tipo (cuadrado = hospital, círculo = centro de salud,
+#     triángulo = puesto sanitario, rombo = otro ESSIDT, triángulo invertido = unidad móvil), todas en azul
 es_r <- st_transform(es, CRS_M)
-es_r$tipo_f <- factor(es_r$tipo_es, levels = c("Centro de salud", "Puesto sanitario", "Otro ESSIDT"))
+es_r$tipo_f <- factor(es_r$tipo_es, levels = niv_tipo_es)
 
 # 4.4 Encuadre: toda la zona cubierta por el KMZ
 ext_r <- st_bbox(rz)
@@ -466,15 +507,17 @@ g_r <- ggplot() +
                     guide = guide_legend(order = 1)) +
   scale_color_manual(values = col_iso_r, name = "Isócrona",
                      guide = guide_legend(order = 2, override.aes = list(linewidth = 1, fill = NA))) +
-  scale_shape_manual(values = c("Centro de salud" = 21, "Puesto sanitario" = 24, "Otro ESSIDT" = 23), name = "Atención primaria (público)", drop = TRUE,
+  scale_shape_manual(values = c("Hospital" = 22, "Centro de salud" = 21, "Puesto sanitario" = 24, "Otro ESSIDT" = 23, "Unidad móvil" = 25),
+                     name = "Establecimiento de salud (público)", drop = TRUE,
                      guide = guide_legend(order = 3)) +
   coord_sf(xlim = c(ext_r[["xmin"]] - dx_r, ext_r[["xmax"]] + dx_r),
            ylim = c(ext_r[["ymin"]] - dy_r, ext_r[["ymax"]] + dy_r), expand = FALSE) +
   labs(
-    title    = paste0(CIUDAD, ": riesgo por calor, centros de atención primaria e isócrona"),
+    title    = paste0(CIUDAD, ": riesgo por calor, establecimientos de salud e isócrona"),
     subtitle = sub_r,
     caption  = paste0("Riesgo por calor: ", basename(ARCHIVO_RIESGO), " (por radio censal; categorías según la leyenda del archivo). ",
-                      "Sedes: ", basename(ARCHIVO_ES), " (públicas, tipología ", TIPOLOGIA, ").\n",
+                      "Sedes: ", basename(ARCHIVO_ES), " (públicas, tipologías ", paste(TIPOLOGIAS, collapse = ", "),
+                      if (!is.null(CATEGORIAS_EXTRA)) " y unidades móviles", "; las móviles, en la ubicación registrada).\n",
                       "Isócrona: calles de OpenStreetMap y tiempos con dodgr, perfil \"", PERFIL, "\" a ", vel_kmh, " km/h.\n",
                       "Los porcentajes de población usan solo los radios del KMZ con dato de densidad.")
   ) +

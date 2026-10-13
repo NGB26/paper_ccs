@@ -1,13 +1,15 @@
 # =============================================================================
-# MÉRIDA (Yucatán, México): mapa estático de riesgo por calor, centros de salud
-# de primer y segundo nivel e isócrona a pie
+# MÉRIDA (Yucatán, México): mapa estático de riesgo por calor, establecimientos
+# de salud con atención a demanda espontánea e isócrona a pie
 # -----------------------------------------------------------------------------
 # Qué hace
 #   1. Lee el KMZ de riesgo por calor (un polígono por manzana). De la ficha de
 #      cada manzana toma la densidad y el % de personas de 65+, y con la
 #      superficie reconstruye la población (densidad x superficie).
-#   2. Lee el Excel del registro CLUES y se queda con las sedes de Mérida de
-#      nivel 1 y 2 (en operación, con coordenadas válidas).
+#   2. Lee el Excel del registro CLUES y se queda con las sedes públicas de Mérida
+#      que atienden demanda espontánea (en operación, con coordenadas válidas):
+#      centros de salud y demás consulta externa, hospitales de cualquier nivel,
+#      unidades móviles y unidades de control metabólico.
 #   3. Descarga la red vial de OpenStreetMap con dodgr y calcula isócronas
 #      (tiempo por la red) desde cada sede con dodgr.
 #   4. Dibuja el mapa estático con ggplot2 y lo guarda en PNG.
@@ -46,9 +48,12 @@ GUARDAR_CAPAS  <- TRUE     # además del PNG, guardar el GeoPackage y el CSV de 
 # Sedes de salud (registro CLUES)
 ENTIDAD_RE       <- "^YUCAT"      # expresión regular sobre la columna ENTIDAD
 MUNICIPIO_RE     <- "^M.?RIDA$"   # expresión regular sobre la columna MUNICIPIO
-NIVELES          <- c(1, 2)       # niveles de atención a mapear (1 = primer nivel, 2 = segundo)
+NIVELES          <- c(1, 2, 3)    # niveles de atención a mapear (1 = primer nivel, 2 = segundo, 3 = tercero)
 INCLUIR_PRIVADOS <- FALSE         # FALSE: se excluyen los "SERVICIOS MEDICOS PRIVADOS"
-TIPOS_ESTAB      <- c("CONSULTA EXTERNA", "HOSPITALIZ")  # se descartan apoyo y asistencia social
+TIPOS_ESTAB      <- c("CONSULTA EXTERNA", "HOSPITALIZ")  # se descartan apoyo y asistencia social...
+# ...salvo estas tipologías, que se incluyen con cualquier tipo de establecimiento y nivel
+# (CLUES registra varias unidades móviles y la unidad metabólica como "DE APOYO", nivel "NO APLICA")
+TIPOLOGIAS_EXTRA <- c("UNIDAD M.VIL", "CONTROL METAB")   # NULL = no agregar ninguna
 EXCLUIR_INST     <- NULL          # regex de instituciones a excluir; ej. "SEGURO SOCIAL|ISSSTE"
 CAJA_COORD       <- c(xmin = -91, ymin = 19.5, xmax = -87.5, ymax = 21.8)  # coordenadas fuera de Yucatán = error de carga
 
@@ -155,7 +160,7 @@ hoja  <- hojas[grepl("^CLUES", hojas)][1]
 if (is.na(hoja)) hoja <- hojas[1]
 nm_todas <- names(read_excel(ARCHIVO_ES, sheet = hoja, n_max = 0))
 usar <- c("CLUES", "ENTIDAD", "MUNICIPIO", "LOCALIDAD", "NOMBRE DE LA INSTITUCION",
-          "NOMBRE DE LA UNIDAD", "NOMBRE TIPO ESTABLECIMIENTO", "NIVEL ATENCION",
+          "NOMBRE DE LA UNIDAD", "NOMBRE TIPO ESTABLECIMIENTO", "NOMBRE DE TIPOLOGIA", "NIVEL ATENCION",
           "ESTATUS DE OPERACION", "ESTRATO UNIDAD", "LATITUD", "LONGITUD")
 faltan <- setdiff(usar, nm_todas)
 if (length(faltan)) stop("Faltan columnas en el Excel de CLUES: ", paste(faltan, collapse = ", "))
@@ -171,6 +176,7 @@ d <- data.frame(
   institucion = cl[["NOMBRE DE LA INSTITUCION"]],
   nombre      = cl[["NOMBRE DE LA UNIDAD"]],
   tipo        = cl[["NOMBRE TIPO ESTABLECIMIENTO"]],
+  tipologia   = cl[["NOMBRE DE TIPOLOGIA"]],
   nivel_txt   = cl[["NIVEL ATENCION"]],
   estatus     = cl[["ESTATUS DE OPERACION"]],
   estrato     = cl[["ESTRATO UNIDAD"]],
@@ -183,7 +189,7 @@ d$nivel <- ifelse(grepl("^PRIMER", d$nivel_txt), 1L,
                          ifelse(grepl("^TERCER", d$nivel_txt), 3L, NA_integer_)))
 
 # Embudo de filtros: se imprime cuántas sedes quedan en cada paso
-embudo <- data.frame(paso = character(), n = int1eger(), stringsAsFactors = FALSE)
+embudo <- data.frame(paso = character(), n = integer(), stringsAsFactors = FALSE)
 anota  <- function(x, paso) { embudo[nrow(embudo) + 1, ] <<- list(paso, nrow(x)); x }
 
 d <- d |> filter(grepl(ENTIDAD_RE, entidad), grepl(MUNICIPIO_RE, municipio)) |> anota("Registros del municipio")
@@ -191,8 +197,10 @@ d <- d |> filter(estatus == "EN OPERACION") |> anota("En operación")
 d <- d |> filter(!is.na(lat), !is.na(lon),
                  lon >= CAJA_COORD[["xmin"]], lon <= CAJA_COORD[["xmax"]],
                  lat >= CAJA_COORD[["ymin"]], lat <= CAJA_COORD[["ymax"]]) |> anota("Con coordenadas válidas")
-d <- d |> filter(nivel %in% NIVELES) |> anota(paste0("Nivel de atención ", paste(NIVELES, collapse = " o ")))
-d <- d |> filter(grepl(paste(TIPOS_ESTAB, collapse = "|"), tipo)) |> anota("Consulta externa u hospitalización")
+extra <- if (is.null(TIPOLOGIAS_EXTRA)) rep(FALSE, nrow(d)) else grepl(paste(TIPOLOGIAS_EXTRA, collapse = "|"), d$tipologia)
+d <- d |> filter((nivel %in% NIVELES & grepl(paste(TIPOS_ESTAB, collapse = "|"), tipo)) | extra) |>
+  anota(paste0("Consulta externa u hospitalización de nivel ", paste(NIVELES, collapse = ", "),
+               if (!is.null(TIPOLOGIAS_EXTRA)) " + unidades móviles y metabólicas"))
 if (!INCLUIR_PRIVADOS) {
   d <- d |> filter(!grepl("PRIVAD", institucion)) |> anota("Sin servicios médicos privados")
 }
@@ -202,9 +210,16 @@ if (!is.null(EXCLUIR_INST)) {
 cat("\nEmbudo de filtros de las sedes:\n"); print(embudo, row.names = FALSE)
 if (nrow(d) == 0) stop("No quedó ninguna sede: revisá los filtros de la sección 2")
 
+# Tipo de sede para el mapa: las unidades móviles y metabólicas van aparte; el resto, por nivel
+niv_sede <- c("Nivel 1", "Nivel 2", "Nivel 3", "Unidad móvil", "Unidad metabólica")
+d$tipo_sede <- ifelse(grepl("UNIDAD M.VIL", d$tipologia), "Unidad móvil",
+                      ifelse(grepl("CONTROL METAB", d$tipologia), "Unidad metabólica",
+                             paste("Nivel", d$nivel)))
+
 es <- st_as_sf(d, coords = c("lon", "lat"), crs = 4326, remove = FALSE) |>
   mutate(id = row_number(), zona = ifelse(grepl("RURAL", estrato), "Rural", "Urbana"))
-cat("\nSedes por nivel y zona:\n"); print(table(nivel = es$nivel, zona = es$zona))
+cat("\nSedes por tipo y zona:\n"); print(table(tipo = es$tipo_sede, zona = es$zona))
+cat("\nSedes por tipología CLUES:\n"); print(sort(table(es$tipologia), decreasing = TRUE))
 cat("\nSedes por institución:\n"); print(sort(table(es$institucion), decreasing = TRUE))
 
 ## 3. Isócronas con OpenStreetMap + dodgr --------------------------------------------
@@ -366,7 +381,7 @@ if (GUARDAR_CAPAS) {
   gpkg_out <- nombre_libre(SALIDA_GPKG)
   write.csv(cobertura_pob, csv_out, row.names = FALSE)
   st_write(
-    st_transform(es[, c("id", "clues", "nombre", "institucion", "zona", "nivel")], CRS_M),
+    st_transform(es[, c("id", "clues", "nombre", "institucion", "tipologia", "tipo_sede", "zona", "nivel")], CRS_M),
     gpkg_out, layer = "establecimientos", quiet = TRUE
   )
   st_write(iso_est,   gpkg_out, layer = "isocronas_por_establecimiento", quiet = TRUE)
@@ -389,9 +404,10 @@ iso_r$etiqueta <- factor(etq, levels = rev(etq))
 col_iso_r <- setNames(colorRampPalette(c("#1e3a8a", "#60a5fa"))(nlevels(iso_r$etiqueta)),
                       levels(iso_r$etiqueta))
 
-# 4.3 Sedes de salud: forma por nivel (círculo = 1, rombo = 2, triángulo = 3), todas en azul
+# 4.3 Sedes de salud: forma por tipo (círculo = nivel 1, rombo = 2, triángulo = 3,
+#     cuadrado = unidad móvil, triángulo invertido = unidad metabólica), todas en azul
 es_r <- st_transform(es, CRS_M)
-es_r$nivel_f <- factor(es_r$nivel, levels = c(1, 2, 3), labels = c("Nivel 1", "Nivel 2", "Nivel 3"))
+es_r$tipo_f <- factor(es_r$tipo_sede, levels = niv_sede)
 
 # 4.4 Encuadre: toda la zona cubierta por el KMZ
 ext_r <- st_bbox(rz)
@@ -409,20 +425,22 @@ if (length(pct_pob) == 1) sub_r <- paste0(sub_r, "\nPoblación de las manzanas a
 g_r <- ggplot() +
   geom_sf(data = rz, aes(fill = riesgo), color = NA, linewidth = 0) +
   geom_sf(data = iso_r, aes(color = etiqueta), fill = "#1d4ed8", alpha = 0.07, linewidth = 1) +
-  geom_sf(data = es_r, aes(shape = nivel_f), fill = "#1d4ed8", color = "white", size = 3.5, stroke = 0.6) +
+  geom_sf(data = es_r, aes(shape = tipo_f), fill = "#1d4ed8", color = "white", size = 3.5, stroke = 0.6) +
   scale_fill_manual(values = col_riesgo, breaks = niv_riesgo, drop = FALSE, name = "Riesgo por calor",
                     guide = guide_legend(order = 1)) +
   scale_color_manual(values = col_iso_r, name = "Isócrona",
                      guide = guide_legend(order = 2, override.aes = list(linewidth = 1, fill = NA))) +
-  scale_shape_manual(values = c("Nivel 1" = 21, "Nivel 2" = 23, "Nivel 3" = 24), name = "Centro de salud",
+  scale_shape_manual(values = c("Nivel 1" = 21, "Nivel 2" = 23, "Nivel 3" = 24, "Unidad móvil" = 22, "Unidad metabólica" = 25),
+                     name = "Establecimiento de salud", drop = TRUE,
                      guide = guide_legend(order = 3)) +
   coord_sf(xlim = c(ext_r[["xmin"]] - dx_r, ext_r[["xmax"]] + dx_r),
            ylim = c(ext_r[["ymin"]] - dy_r, ext_r[["ymax"]] + dy_r), expand = FALSE) +
   labs(
-    title    = paste0(CIUDAD, ": riesgo por calor, centros de salud de nivel ", paste(NIVELES, collapse = " y "), " e isócrona"),
+    title    = paste0(CIUDAD, ": riesgo por calor, establecimientos de salud e isócrona"),
     subtitle = sub_r,
     caption  = paste0("Riesgo por calor: ", basename(ARCHIVO_RIESGO), " (por manzana; categorías según la leyenda del archivo). ",
-                      "Sedes: ", basename(ARCHIVO_ES), ".\n",
+                      "Sedes: ", basename(ARCHIVO_ES), " (públicas, nivel ", paste(NIVELES, collapse = "-"), ", más unidades móviles y metabólicas).\n",
+                      "Las unidades móviles se ubican en la base registrada en CLUES, no en sus puntos de atención.\n",
                       "Isócrona: calles de OpenStreetMap y tiempos con dodgr, perfil \"", PERFIL, "\" a ", vel_kmh, " km/h.\n",
                       "Los porcentajes de población usan solo las manzanas del KMZ con dato de densidad.")
   ) +
