@@ -53,9 +53,11 @@ EXCLUIR_INST     <- NULL          # regex de instituciones a excluir; ej. "SEGUR
 CAJA_COORD       <- c(xmin = -91, ymin = 19.5, xmax = -87.5, ymax = 21.8)  # coordenadas fuera de Yucatán = error de carga
 
 # Isócronas
-CORTES_MIN    <- 5          # minutos a calcular. Sumar 15 o 30 agranda la descarga y alarga la corrida
-MIN_MOSTRAR   <- 5          # isócrona(s) que se dibujan en el mapa (deben estar en CORTES_MIN)
+CORTES_MIN    <- 15          # minutos a calcular. Sumar 15 o 30 agranda la descarga y alarga la corrida
+MIN_MOSTRAR   <- 15          # isócrona(s) que se dibujan en el mapa (deben estar en CORTES_MIN)
 PERFIL        <- "foot"     # perfil de dodgr: "foot" (5 km/h), "bicycle", "motorcar"
+VEL_KMH       <- 3.5          # velocidad de caminata en km/h (solo con PERFIL "foot"); 5 = la del perfil de dodgr.
+# Ej.: 4 = paso lento; 3.6 (1 m/s) = adultos mayores. NULL = la del perfil.
 BUFFER_M      <- 100        # ancho (m) alrededor de las calles alcanzadas
 HUECOS_M2     <- 50000      # se rellenan huecos menores a esto (m2)
 AMBITO        <- "urbano"   # "urbano": sedes dentro de la zona del KMZ; "municipio": todas las sedes
@@ -181,7 +183,7 @@ d$nivel <- ifelse(grepl("^PRIMER", d$nivel_txt), 1L,
                          ifelse(grepl("^TERCER", d$nivel_txt), 3L, NA_integer_)))
 
 # Embudo de filtros: se imprime cuántas sedes quedan en cada paso
-embudo <- data.frame(paso = character(), n = integer(), stringsAsFactors = FALSE)
+embudo <- data.frame(paso = character(), n = int1eger(), stringsAsFactors = FALSE)
 anota  <- function(x, paso) { embudo[nrow(embudo) + 1, ] <<- list(paso, nrow(x)); x }
 
 d <- d |> filter(grepl(ENTIDAD_RE, entidad), grepl(MUNICIPIO_RE, municipio)) |> anota("Registros del municipio")
@@ -217,8 +219,11 @@ if (nrow(origen) == 0) stop("Ninguna sede cae dentro de la zona del KMZ: revisá
 cat("Sedes con isócronas:", nrow(origen), "de", nrow(es), "\n")
 
 # 3.2 Caja para descargar la red: sedes + alcance máximo + margen
-vel_kmh <- c(foot = 5, bicycle = 15, motorcar = 30)[[PERFIL]]
-margen  <- max(CORTES_MIN) / 60 * vel_kmh / 111 + 0.01      # en grados
+vel_base <- c(foot = 5, bicycle = 15, motorcar = 30)[[PERFIL]]   # km/h que asume el perfil de dodgr
+vel_kmh  <- if (is.null(VEL_KMH)) vel_base else VEL_KMH           # km/h que se usa en este análisis
+if (vel_kmh != vel_base && PERFIL != "foot") warning("VEL_KMH se aplica como una proporción simple sobre los tiempos del perfil '", PERFIL,
+                                                     "', cuyas velocidades varían por tipo de calle; es solo aproximado.")
+margen   <- max(CORTES_MIN) / 60 * max(vel_base, vel_kmh) / 111 + 0.01   # en grados
 bb <- st_bbox(origen)
 bb <- c(xmin = bb[["xmin"]] - margen, ymin = bb[["ymin"]] - margen,
         xmax = bb[["xmax"]] + margen, ymax = bb[["ymax"]] + margen)
@@ -276,6 +281,13 @@ if (any(dmin > 250)) {
 
 tiempos <- dodgr_times(gr, from = desde, to = v[, c("x", "y")], shortest = FALSE)
 tiempos[is.na(tiempos)] <- Inf
+if (vel_kmh != vel_base) {
+  # dodgr calcula los tiempos con la velocidad de su perfil (vel_base); se reescalan a la velocidad elegida.
+  # Las rutas óptimas no cambian (la velocidad es la misma en todas las calles), solo los tiempos.
+  tiempos <- tiempos * (vel_base / vel_kmh)
+  cat("Velocidad de caminata:", vel_kmh, "km/h (perfil:", vel_base, "km/h). Alcance en", max(CORTES_MIN),
+      "min:", round(max(CORTES_MIN) / 60 * vel_kmh * 1000), "m por la red.\n")
+}
 cat("Matriz de tiempos:", nrow(tiempos), "sedes x", ncol(tiempos), "vértices\n")
 
 # 3.6 Tramos de la red (una sola vez, en metros) para dibujar el área alcanzada
@@ -340,14 +352,26 @@ cobertura_pob <- do.call(rbind, lapply(sort(CORTES_MIN), function(m) {
 cat("\nCobertura de población por isócrona:\n"); print(cobertura_pob, row.names = FALSE)
 
 if (GUARDAR_CAPAS) {
-  write.csv(cobertura_pob, SALIDA_CSV, row.names = FALSE)
-  if (file.exists(SALIDA_GPKG)) invisible(file.remove(SALIDA_GPKG))
+  # Si el archivo está abierto (QGIS, Excel) o OneDrive lo está sincronizando, no se puede
+  # sobrescribir: en ese caso se guarda con la fecha y hora en el nombre, y el script sigue.
+  nombre_libre <- function(ruta) {
+    if (!file.exists(ruta)) return(ruta)
+    if (suppressWarnings(file.remove(ruta))) return(ruta)
+    nueva <- sub("(\\.[A-Za-z]+)$", paste0("_", format(Sys.time(), "%Y%m%d_%H%M%S"), "\\1"), ruta)
+    warning("No pude sobrescribir '", basename(ruta), "' (¿abierto en QGIS/Excel o sincronizando OneDrive?). ",
+            "Lo guardo como '", basename(nueva), "'.", call. = FALSE)
+    nueva
+  }
+  csv_out  <- nombre_libre(SALIDA_CSV)
+  gpkg_out <- nombre_libre(SALIDA_GPKG)
+  write.csv(cobertura_pob, csv_out, row.names = FALSE)
   st_write(
     st_transform(es[, c("id", "clues", "nombre", "institucion", "zona", "nivel")], CRS_M),
-    SALIDA_GPKG, layer = "establecimientos", quiet = TRUE
+    gpkg_out, layer = "establecimientos", quiet = TRUE
   )
-  st_write(iso_est,   SALIDA_GPKG, layer = "isocronas_por_establecimiento", quiet = TRUE)
-  st_write(cobertura, SALIDA_GPKG, layer = "cobertura_total", quiet = TRUE)
+  st_write(iso_est,   gpkg_out, layer = "isocronas_por_establecimiento", quiet = TRUE)
+  st_write(cobertura, gpkg_out, layer = "cobertura_total", quiet = TRUE)
+  cat("Capas guardadas en:", gpkg_out, "\nCobertura (CSV):", csv_out, "\n")
 }
 
 ## 4. Mapa estático con ggplot2 ------------------------------------------------
@@ -399,7 +423,7 @@ g_r <- ggplot() +
     subtitle = sub_r,
     caption  = paste0("Riesgo por calor: ", basename(ARCHIVO_RIESGO), " (por manzana; categorías según la leyenda del archivo). ",
                       "Sedes: ", basename(ARCHIVO_ES), ".\n",
-                      "Isócrona: red de OpenStreetMap (OpenStreetMap + dodgr), perfil \"", PERFIL, "\" a ", vel_kmh, " km/h.\n",
+                      "Isócrona: calles de OpenStreetMap y tiempos con dodgr, perfil \"", PERFIL, "\" a ", vel_kmh, " km/h.\n",
                       "Los porcentajes de población usan solo las manzanas del KMZ con dato de densidad.")
   ) +
   theme_void(base_size = 11) +
@@ -427,3 +451,93 @@ if (requireNamespace("ggspatial", quietly = TRUE)) {
 print(g_r)
 ggsave(SALIDA_PNG, g_r, width = 9, height = 10, dpi = 300, bg = "white")
 cat("\nMapa estático:", SALIDA_PNG, "\n")
+
+
+## 5. Cobertura por nivel de riesgo: tabla cruzada (pegar al final del script) ----
+# Para cada corte de minutos (CORTES_MIN) calcula:
+#   - el % de la población TOTAL que queda dentro / fuera de la isócrona;
+#   - para cada nivel de riesgo, el % de su población que queda dentro / fuera
+#     (porcentajes por fila: cada fila suma 100);
+#   - el peso de cada celda sobre la población total de la ciudad (pct_*_tot; suma 100 en toda la tabla).
+# Usa objetos que el script ya creó: rz, pts_rz, cobertura, CORTES_MIN, niv_riesgo y SALIDA_CSV.
+# La población de cada unidad (manzana o radio) es rz$pob; una unidad cuenta como "dentro" si su
+# punto interior cae dentro de la isócrona (el mismo criterio de la sección 3.7).
+
+# 5.1 Nivel de riesgo de cada unidad (si alguna no tiene categoría, va en "Sin categoría")
+cat_r <- as.character(rz$riesgo)
+cat_r[is.na(cat_r)] <- "Sin categoría"
+cat_r <- droplevels(factor(cat_r, levels = c(niv_riesgo, "Sin categoría")))
+
+# 5.2 Tabla cruzada para un corte de m minutos
+cruce_riesgo <- function(m) {
+  dentro <- lengths(st_intersects(pts_rz, cobertura[cobertura$minutos == m, ])) > 0
+  d <- data.frame(
+    riesgo    = cat_r,
+    ubicacion = factor(ifelse(dentro, "Dentro", "Fuera"), levels = c("Dentro", "Fuera")),
+    pob       = rz$pob
+  )
+  d <- d[!is.na(d$pob), ]                       # sin dato de población no se puede ponderar
+  tp <- addmargins(xtabs(pob ~ riesgo + ubicacion, data = d))     # personas, con totales
+  tu <- addmargins(xtabs(~ riesgo + ubicacion, data = d))         # unidades, con totales
+  rownames(tp)[nrow(tp)] <- "Total"
+  pct <- function(a, b) { r <- 100 * a / b; r[!(b > 0)] <- NA_real_; r }
+  gran_total <- tp["Total", "Sum"]
+  data.frame(
+    minutos              = m,
+    riesgo               = rownames(tp),
+    unidades             = as.integer(tu[, "Sum"]),
+    pob_total            = round(tp[, "Sum"]),
+    pob_dentro           = round(tp[, "Dentro"]),
+    pob_fuera            = round(tp[, "Fuera"]),
+    pct_dentro           = round(pct(tp[, "Dentro"], tp[, "Sum"]), 1),   # % de la fila dentro
+    pct_fuera            = round(pct(tp[, "Fuera"],  tp[, "Sum"]), 1),   # % de la fila fuera
+    pct_dentro_tot       = round(pct(tp[, "Dentro"], gran_total), 1),    # % de TODA la población
+    pct_fuera_tot        = round(pct(tp[, "Fuera"],  gran_total), 1),
+    row.names = NULL
+  )
+}
+
+cruce_riesgo_isocronas <- do.call(rbind, lapply(sort(CORTES_MIN), cruce_riesgo))
+
+# 5.3 Resultados por consola
+cat("\n=== Cobertura por nivel de riesgo (personas y % por fila) ===\n")
+for (m in sort(CORTES_MIN)) {
+  tt <- cruce_riesgo_isocronas[cruce_riesgo_isocronas$minutos == m, ]
+  tot <- tt[tt$riesgo == "Total", ]
+  cat(sprintf("\n--- Isócrona de %s min ---\n", m))
+  cat(sprintf("Población total dentro de la isócrona: %.1f%% (%s de %s personas) | fuera: %.1f%%\n",
+              tot$pct_dentro, format(tot$pob_dentro, big.mark = ".", decimal.mark = ","),
+              format(tot$pob_total, big.mark = ".", decimal.mark = ","), tot$pct_fuera))
+  print(tt[tt$pob_total > 0, c("riesgo", "pob_total", "pob_dentro", "pob_fuera", "pct_dentro", "pct_fuera",
+                               "pct_dentro_tot", "pct_fuera_tot")], row.names = FALSE)
+}
+cat("\nLectura: 'pct_dentro' y 'pct_fuera' son % de la población de ESE nivel de riesgo (cada fila suma 100);",
+    "\n'pct_dentro_tot' y 'pct_fuera_tot' son % de la población total de la ciudad (todas las celdas suman 100).\n")
+sin_pob <- unique(cruce_riesgo_isocronas$riesgo[cruce_riesgo_isocronas$pob_total == 0])
+if (length(sin_pob)) cat("Niveles sin población (no se muestran):", paste(sin_pob, collapse = ", "), "\n")
+n_sin_pob <- sum(is.na(rz$pob))
+if (n_sin_pob > 0) cat("Unidades sin dato de población (excluidas de la tabla):", n_sin_pob, "de", nrow(rz), "\n")
+
+# 5.4 Control: el total debe coincidir con la cobertura de la sección 3.7
+if (exists("cobertura_pob")) {
+  chk <- merge(cobertura_pob[, c("min", "pct")],
+               cruce_riesgo_isocronas[cruce_riesgo_isocronas$riesgo == "Total", c("minutos", "pct_dentro")],
+               by.x = "min", by.y = "minutos")
+  if (any(abs(chk$pct - chk$pct_dentro) > 0.1))
+    warning("El % total dentro de la tabla cruzada no coincide con 'cobertura_pob'; revisá los datos.", call. = FALSE)
+}
+
+# 5.5 Guardar el CSV junto al de cobertura (si el archivo está abierto, lo guarda con fecha y hora)
+if (!exists("GUARDAR_CAPAS") || GUARDAR_CAPAS) {
+  if (!exists("nombre_libre")) nombre_libre <- function(ruta) {
+    if (!file.exists(ruta)) return(ruta)
+    if (suppressWarnings(file.remove(ruta))) return(ruta)
+    nueva <- sub("(\\.[A-Za-z]+)$", paste0("_", format(Sys.time(), "%Y%m%d_%H%M%S"), "\\1"), ruta)
+    warning("No pude sobrescribir '", basename(ruta), "'. Lo guardo como '", basename(nueva), "'.", call. = FALSE)
+    nueva
+  }
+  ciudad_id  <- sub("^cobertura_poblacion_isocronas_(.*)\\.csv$", "\\1", basename(SALIDA_CSV))
+  csv_cruce  <- nombre_libre(file.path(dirname(SALIDA_CSV), paste0("cruce_riesgo_isocronas_", ciudad_id, ".csv")))
+  write.csv(cruce_riesgo_isocronas, csv_cruce, row.names = FALSE)
+  cat("Tabla cruzada guardada en:", csv_cruce, "\n")
+}
