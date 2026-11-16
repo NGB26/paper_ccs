@@ -488,9 +488,12 @@ cruce_riesgo <- function(m) {
   d <- data.frame(
     riesgo    = cat_r,
     ubicacion = factor(ifelse(dentro, "Dentro", "Fuera"), levels = c("Dentro", "Fuera")),
-    pob       = rz$pob
+    pob       = rz$pob, 
+    pob_65     = rz$pob_65
   )
-  d <- d[!is.na(d$pob), ]                       # sin dato de población no se puede ponderar
+  d <- d[!is.na(d$pob), ]   # sin dato de población no se puede ponderar
+  d65 <- d[!is.na(d$pob_65), ]
+  t65 <- addmargins(xtabs(pob_65 ~ riesgo + ubicacion, data=d65))
   tp <- addmargins(xtabs(pob ~ riesgo + ubicacion, data = d))     # personas, con totales
   tu <- addmargins(xtabs(~ riesgo + ubicacion, data = d))         # unidades, con totales
   rownames(tp)[nrow(tp)] <- "Total"
@@ -507,10 +510,19 @@ cruce_riesgo <- function(m) {
     pct_fuera            = round(pct(tp[, "Fuera"],  tp[, "Sum"]), 1),   # % de la fila fuera
     pct_dentro_tot       = round(pct(tp[, "Dentro"], gran_total), 1),    # % de TODA la población
     pct_fuera_tot        = round(pct(tp[, "Fuera"],  gran_total), 1),
+    pob_65               = round(t65[, "Sum"]),
+    pob_65_fuera         = round(t65[, "Fuera"]), 
+    pob_65_dentro        = round(t65[, "Dentro"]), 
+    pct_65_dentro        =round(pct( t65[, "Dentro"] , t65[, "Sum"]),1), 
+    pct_65_fuera        =round(pct( t65[, "Fuera"] , t65[, "Sum"]),1), 
+
     row.names = NULL
   )
 }
 
+print(tt[tt$pob_total > 0, c("riesgo", "pob_total", "pob_dentro", "pob_fuera", "pct_dentro", "pct_fuera",
+                             "pct_dentro_tot", "pct_fuera_tot",
+                             "pob_65", "pct_65_dentro", "pct_65_fuera")], row.names = FALSE)
 cruce_riesgo_isocronas <- do.call(rbind, lapply(sort(CORTES_MIN), cruce_riesgo))
 
 # 5.3 Resultados por consola

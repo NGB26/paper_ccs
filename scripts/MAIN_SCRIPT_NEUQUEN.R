@@ -180,29 +180,11 @@ confluencia_ind <- confluencia_ind |>
 #     (fuente: latitude.to y db-city.com). El recorte solo afecta la
 #     visualización (zoom), no los datos ni los cortes por cuantiles.
 #
-# Si preferís un recorte administrativo exacto (por localidad censal, en vez de
-# una caja aproximada), la capa oficial de INDEC con polígonos de localidad está
-# en https://geonode.indec.gob.ar/layers/geonode_data:geonode:localidades_censales
-# (campo "nam" = nombre de localidad, "aglomerado" = conglomerado al que
-# pertenece). Se puede leer directamente en R con sf::read_sf() apuntando a la
-# URL WFS de esa capa y cruzar por intersección de centroides con st_join().
-# Dejo comentado un bloque con esa alternativa por si el recorte por caja no
-# resulta suficientemente preciso.
 
 confluencia_urbano <- confluencia_ind |> filter(TIPO != "R")
 
 bbox_metro <- c(xmin = -68.20, xmax = -67.99, ymin = -38.99, ymax = -38.86)
 
-# --- Alternativa por localidad censal (INDEC), desactivada por defecto ------
-# localidades <- read_sf(paste0(
-#   "https://geonode.indec.gob.ar/geoserver/ows?service=WFS&version=2.0.0&",
-#   "request=GetFeature&typeName=geonode:localidades_censales&",
-#   "outputFormat=application/json&CQL_FILTER=cpr=%2758%27"
-# ))
-# metro_neuquen <- localidades |>
-#   filter(nam %in% c("Neuquén", "Plottier", "Centenario", "Vista Alegre Sur"))
-# confluencia_urbano <- confluencia_ind |>
-#   st_join(st_transform(metro_neuquen, st_crs(confluencia_ind)), left = FALSE)
 
 # ------------------------------------------------------------------------------
 # PASO 4. Función de mapa (reutilizable para todas las variables)
