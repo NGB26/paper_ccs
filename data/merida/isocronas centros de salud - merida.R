@@ -477,8 +477,9 @@ cat("\nMapa estático:", SALIDA_PNG, "\n")
 #   - para cada nivel de riesgo, el % de su población que queda dentro / fuera
 #     (porcentajes por fila: cada fila suma 100);
 #   - el peso de cada celda sobre la población total de la ciudad (pct_*_tot; suma 100 en toda la tabla).
+#   - lo mismo para las personas de 65+ (pob_65*, pct_65_*): % de los 65+ de cada nivel dentro / fuera.
 # Usa objetos que el script ya creó: rz, pts_rz, cobertura, CORTES_MIN, niv_riesgo y SALIDA_CSV.
-# La población de cada unidad (manzana o radio) es rz$pob; una unidad cuenta como "dentro" si su
+# La población de cada unidad (manzana o radio) es rz$pob (y rz$pob_65 la de 65+); una unidad cuenta como "dentro" si su
 # punto interior cae dentro de la isócrona (el mismo criterio de la sección 3.7).
 
 # 5.1 Nivel de riesgo de cada unidad (si alguna no tiene categoría, va en "Sin categoría")
@@ -492,11 +493,14 @@ cruce_riesgo <- function(m) {
   d <- data.frame(
     riesgo    = cat_r,
     ubicacion = factor(ifelse(dentro, "Dentro", "Fuera"), levels = c("Dentro", "Fuera")),
-    pob       = rz$pob
+    pob       = rz$pob,
+    pob_65    = rz$pob_65
   )
-  d <- d[!is.na(d$pob), ]                       # sin dato de población no se puede ponderar
-  tp <- addmargins(xtabs(pob ~ riesgo + ubicacion, data = d))     # personas, con totales
-  tu <- addmargins(xtabs(~ riesgo + ubicacion, data = d))         # unidades, con totales
+  d   <- d[!is.na(d$pob), ]                     # sin dato de población no se puede ponderar
+  d65 <- d[!is.na(d$pob_65), ]                  # 65+: solo unidades con dato de % 65+ (un NA no cuenta como 0)
+  tp  <- addmargins(xtabs(pob ~ riesgo + ubicacion, data = d))       # personas, con totales
+  tu  <- addmargins(xtabs(~ riesgo + ubicacion, data = d))           # unidades, con totales
+  t65 <- addmargins(xtabs(pob_65 ~ riesgo + ubicacion, data = d65))  # personas de 65+, con totales (mismas filas que tp)
   rownames(tp)[nrow(tp)] <- "Total"
   pct <- function(a, b) { r <- 100 * a / b; r[!(b > 0)] <- NA_real_; r }
   gran_total <- tp["Total", "Sum"]
@@ -511,6 +515,11 @@ cruce_riesgo <- function(m) {
     pct_fuera            = round(pct(tp[, "Fuera"],  tp[, "Sum"]), 1),   # % de la fila fuera
     pct_dentro_tot       = round(pct(tp[, "Dentro"], gran_total), 1),    # % de TODA la población
     pct_fuera_tot        = round(pct(tp[, "Fuera"],  gran_total), 1),
+    pob_65               = round(t65[, "Sum"]),                          # personas de 65+ del nivel
+    pob_65_dentro        = round(t65[, "Dentro"]),
+    pob_65_fuera         = round(t65[, "Fuera"]),
+    pct_65_dentro        = round(pct(t65[, "Dentro"], t65[, "Sum"]), 1), # % de los 65+ de la fila dentro
+    pct_65_fuera         = round(pct(t65[, "Fuera"],  t65[, "Sum"]), 1), # % de los 65+ de la fila fuera
     row.names = NULL
   )
 }
@@ -526,23 +535,32 @@ for (m in sort(CORTES_MIN)) {
   cat(sprintf("Población total dentro de la isócrona: %.1f%% (%s de %s personas) | fuera: %.1f%%\n",
               tot$pct_dentro, format(tot$pob_dentro, big.mark = ".", decimal.mark = ","),
               format(tot$pob_total, big.mark = ".", decimal.mark = ","), tot$pct_fuera))
+  cat(sprintf("Personas de 65+ dentro de la isócrona: %.1f%% (%s de %s) | fuera: %.1f%%\n",
+              tot$pct_65_dentro, format(tot$pob_65_dentro, big.mark = ".", decimal.mark = ","),
+              format(tot$pob_65, big.mark = ".", decimal.mark = ","), tot$pct_65_fuera))
   print(tt[tt$pob_total > 0, c("riesgo", "pob_total", "pob_dentro", "pob_fuera", "pct_dentro", "pct_fuera",
-                               "pct_dentro_tot", "pct_fuera_tot")], row.names = FALSE)
+                               "pct_dentro_tot", "pct_fuera_tot",
+                               "pob_65", "pct_65_dentro", "pct_65_fuera")], row.names = FALSE)
 }
 cat("\nLectura: 'pct_dentro' y 'pct_fuera' son % de la población de ESE nivel de riesgo (cada fila suma 100);",
-    "\n'pct_dentro_tot' y 'pct_fuera_tot' son % de la población total de la ciudad (todas las celdas suman 100).\n")
+    "\n'pct_dentro_tot' y 'pct_fuera_tot' son % de la población total de la ciudad (todas las celdas suman 100);",
+    "\n'pct_65_dentro' y 'pct_65_fuera' son % de las personas de 65+ de ESE nivel de riesgo (cada fila suma 100).\n")
 sin_pob <- unique(cruce_riesgo_isocronas$riesgo[cruce_riesgo_isocronas$pob_total == 0])
 if (length(sin_pob)) cat("Niveles sin población (no se muestran):", paste(sin_pob, collapse = ", "), "\n")
 n_sin_pob <- sum(is.na(rz$pob))
 if (n_sin_pob > 0) cat("Unidades sin dato de población (excluidas de la tabla):", n_sin_pob, "de", nrow(rz), "\n")
+n_sin_65 <- sum(!is.na(rz$pob) & is.na(rz$pob_65))
+if (n_sin_65 > 0) cat("Unidades con población pero sin dato de % 65+ (excluidas de las columnas 65+):", n_sin_65, "de", nrow(rz), "\n")
 
 # 5.4 Control: el total debe coincidir con la cobertura de la sección 3.7
 if (exists("cobertura_pob")) {
-  chk <- merge(cobertura_pob[, c("min", "pct")],
-               cruce_riesgo_isocronas[cruce_riesgo_isocronas$riesgo == "Total", c("minutos", "pct_dentro")],
+  chk <- merge(cobertura_pob[, c("min", "pct", "pob_65")],
+               cruce_riesgo_isocronas[cruce_riesgo_isocronas$riesgo == "Total", c("minutos", "pct_dentro", "pob_65_dentro")],
                by.x = "min", by.y = "minutos")
   if (any(abs(chk$pct - chk$pct_dentro) > 0.1))
     warning("El % total dentro de la tabla cruzada no coincide con 'cobertura_pob'; revisá los datos.", call. = FALSE)
+  if (any(abs(chk$pob_65 - chk$pob_65_dentro) > 1))
+    warning("Las personas de 65+ dentro de la tabla cruzada no coinciden con 'cobertura_pob'; revisá los datos.", call. = FALSE)
 }
 
 # 5.5 Guardar el CSV junto al de cobertura (si el archivo está abierto, lo guarda con fecha y hora)
